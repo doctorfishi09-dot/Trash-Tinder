@@ -939,6 +939,25 @@ document.getElementById('btn-rename-household').addEventListener('click', async 
   }
 });
 
+document.getElementById('btn-check-updates').addEventListener('click', async () => {
+  if (!confirm('Force a refresh from the server? This reloads the app and applies any new version. You stay logged into your households.')) return;
+  toast('Refreshing...');
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister().catch(() => {})));
+    }
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k).catch(() => {})));
+    }
+  } catch (e) {
+    // Non-fatal: the reload below will still try the network.
+  }
+  // Cache-buster query param on the reload so the browser hits the network.
+  window.location.href = window.location.pathname + '?r=' + Date.now();
+});
+
 document.getElementById('btn-copy-code').addEventListener('click', async () => {
   if (!state.currentHousehold) return;
   const code = state.currentHousehold.invite_code;
