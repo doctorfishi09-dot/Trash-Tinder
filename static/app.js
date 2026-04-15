@@ -141,17 +141,28 @@ const api = {
     if (!r.ok) throw new Error(j.error || 'not found');
     return j.item;
   },
-  async createItem(blob, title, note, userId, votingRule) {
+  async createItem(blob, title, note, userId, votingRule, timeLimitSeconds) {
     const form = new FormData();
     form.append('user_id', userId);
     form.append('title', title);
     form.append('note', note);
     form.append('voting_rule', votingRule || 'keep_wins');
+    // 'none' (or empty) tells the server to store NULL — no time limit.
+    form.append('time_limit_seconds',
+      (timeLimitSeconds == null || timeLimitSeconds === 'none') ? 'none' : String(timeLimitSeconds));
     form.append('photo', blob, 'photo.jpg');
     const r = await fetch('/api/items', { method: 'POST', body: form });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'upload failed');
     return j.item;
+  },
+  async finalizeEarly(itemId) {
+    const r = await fetch('/api/items/' + encodeURIComponent(itemId) + '/finalize-now', {
+      method: 'POST',
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'could not finish early');
+    return j;
   },
   async deleteItem(itemId) {
     const r = await fetch('/api/items/' + encodeURIComponent(itemId), { method: 'DELETE' });
@@ -731,6 +742,9 @@ submitBtn.addEventListener('click', async () => {
   if (!state.currentUser || !state.pendingPhoto) return;
   const ruleInput = document.querySelector('input[name="voting-rule"]:checked');
   const rule = ruleInput ? ruleInput.value : 'keep_wins';
+  const tlSelect = document.getElementById('time-limit-select');
+  const tlRaw = tlSelect ? tlSelect.value : '86400';
+  const timeLimit = tlRaw === 'none' ? 'none' : parseInt(tlRaw, 10);
   submitBtn.disabled = true;
   addStatus.hidden = false;
   addStatus.className = 'status';
@@ -742,6 +756,7 @@ submitBtn.addEventListener('click', async () => {
       itemNote.value.trim(),
       state.currentUser.id,
       rule,
+      timeLimit,
     );
     addStatus.textContent = 'Added to the pile!';
     addStatus.className = 'status ok';
@@ -753,6 +768,7 @@ submitBtn.addEventListener('click', async () => {
     photoPlaceholder.hidden = false;
     const defaultRule = document.querySelector('input[name="voting-rule"][value="keep_wins"]');
     if (defaultRule) defaultRule.checked = true;
+    if (tlSelect) tlSelect.value = '86400';
     setTimeout(() => { addStatus.hidden = true; showView('deck'); }, 900);
   } catch (e) {
     addStatus.textContent = e.message;
@@ -822,6 +838,8 @@ async function refreshHistory() {
     const addedBy = state.users.find(u => u.id === item.created_by)?.name || '?';
     const date = new Date((item.decided_at || item.created_at) * 1000)
       .toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+    const earlyPill = item.close_reason === 'early'
+      ? '<span class="early-pill">early</span>' : '';
     const row = document.createElement('div');
     row.className = 'history-row';
     row.innerHTML = `
@@ -831,6 +849,7 @@ async function refreshHistory() {
         <div class="sub">by ${escapeHtml(addedBy)} · ${date}</div>
       </div>
       <div class="outcome ${item.status}">${item.status}</div>
+      ${earlyPill}
     `;
     row.addEventListener('click', () => openItemDetail(item.id));
     list.appendChild(row);
@@ -983,10 +1002,11 @@ function renderItemDetail(item) {
   const createdAt = new Date(item.created_at * 1000)
     .toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
   document.getElementById('modal-meta').textContent = `Added by ${addedBy} · ${createdAt}`;
-  document.getElementById('modal-rule').textContent =
-    item.voting_rule === 'majority'
-      ? 'Rule: majority wins (ties go to kept)'
-      : 'Rule: any keep saves it';
+  const ruleLine = item.voting_rule === 'majority'
+    ? 'Rule: majority wins (ties go to kept)'
+    : 'Rule: any keep saves it';
+  const limitLine = formatTimeLimitLine(item);
+  document.getElementById('modal-rule').textContent = `${ruleLine} · ${limitLine}`;
 
   const statusRow = document.getElementById('modal-status-row');
   statusRow.innerHTML = '';
@@ -999,6 +1019,12 @@ function renderItemDetail(item) {
     chip.textContent = item.status;
   }
   statusRow.appendChild(chip);
+  if (item.close_reason === 'early') {
+    const early = document.createElement('span');
+    early.className = 'early-pill';
+    early.textContent = 'finished early';
+    statusRow.appendChild(early);
+  }
 
   const votesEl = document.getElementById('modal-votes');
   votesEl.innerHTML = '';
@@ -1035,6 +1061,25 @@ function renderItemDetail(item) {
   delBtn.textContent = item.status === 'pending'
     ? 'Delete this item (cancel voting)'
     : 'Delete this item';
+
+  const finalizeBtn = document.getElementById('modal-finalize-early');
+  finalizeBtn.hidden = item.status !== 'pending';
+}
+
+function formatTimeLimitLine(item) {
+  const tl = item.time_limit_seconds;
+  if (tl == null || tl <= 0) return 'no time limit';
+  const labels = {
+    3600: '1h limit',
+    21600: '6h limit',
+    86400: '24h limit',
+    259200: '3-day limit',
+    604800: '1-week limit',
+  };
+  if (labels[tl]) return labels[tl];
+  if (tl < 3600) return `${Math.round(tl / 60)}m limit`;
+  if (tl < 86400) return `${Math.round(tl / 3600)}h limit`;
+  return `${Math.round(tl / 86400)}-day limit`;
 }
 
 async function changeMyVote(choice) {
@@ -1074,6 +1119,23 @@ document.getElementById('modal-delete').addEventListener('click', async () => {
     closeItemDetail();
     if (state.view === 'history') refreshHistory();
     if (state.view === 'ongoing') refreshOngoing();
+    if (state.view === 'deck') refreshDeck();
+  } catch (e) {
+    toast(e.message);
+  }
+});
+
+document.getElementById('modal-finalize-early').addEventListener('click', async () => {
+  if (!state.selectedItemId) return;
+  if (!confirm('Finish voting now? The item will be decided with the votes cast so far. This cannot be undone.')) return;
+  try {
+    const res = await api.finalizeEarly(state.selectedItemId);
+    const o = res.outcome && res.outcome.outcome;
+    toast(o === 'kept' ? 'Kept (finished early)' : 'Tossed (finished early)');
+    const fresh = await api.itemDetail(state.selectedItemId);
+    renderItemDetail(fresh);
+    if (state.view === 'ongoing') refreshOngoing();
+    if (state.view === 'history') refreshHistory();
     if (state.view === 'deck') refreshDeck();
   } catch (e) {
     toast(e.message);

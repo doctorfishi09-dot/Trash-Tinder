@@ -473,6 +473,18 @@ body.has-header .view {
 }
 .rule-title { font-weight: 600; font-size: 14px; }
 .rule-desc { font-size: 12px; margin-top: 2px; }
+.time-limit-select {
+  width: 100%;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+.time-limit-select:focus { outline: none; border-color: var(--accent); }
 
 /* ---------- ongoing list ---------- */
 .ongoing-list { display: flex; flex-direction: column; gap: 10px; }
@@ -564,6 +576,18 @@ body.has-header .view {
 }
 .outcome.kept { background: rgba(45,212,191,0.15); color: var(--keep); }
 .outcome.tossed { background: rgba(239,68,68,0.15); color: var(--toss); }
+.early-pill {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  background: rgba(245,165,36,0.15);
+  color: var(--skip);
+  margin-left: 6px;
+  white-space: nowrap;
+}
 
 /* ---------- who ---------- */
 .users-list { display: flex; flex-direction: column; gap: 8px; }
@@ -766,6 +790,19 @@ body.has-header .view {
 }
 .modal-delete:hover, .modal-delete:active {
   background: rgba(239,68,68,0.12);
+}
+.modal-finalize-early {
+  margin-top: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--skip);
+  color: var(--skip);
+  padding: 10px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.modal-finalize-early:hover, .modal-finalize-early:active {
+  background: rgba(245,165,36,0.1);
 }
 .my-vote {
   margin-top: 4px;

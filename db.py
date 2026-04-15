@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS items (
     status TEXT NOT NULL DEFAULT 'pending',  -- pending | kept | tossed
     decided_at INTEGER,
     voting_rule TEXT NOT NULL DEFAULT 'keep_wins',  -- keep_wins | majority
+    time_limit_seconds INTEGER DEFAULT 86400,      -- per-item round length; NULL = no limit
+    close_reason TEXT,                              -- all_voted | timeout | early (NULL while pending)
     FOREIGN KEY (household_id) REFERENCES households(id),
     FOREIGN KEY (created_by) REFERENCES users(id)
 );
@@ -136,6 +138,22 @@ def _migrate(conn) -> None:
         conn.execute(
             "ALTER TABLE items "
             "ADD COLUMN voting_rule TEXT NOT NULL DEFAULT 'keep_wins'"
+        )
+
+    # Per-item time limit (default 86400 = 24h, matches the previous global
+    # constant so existing items keep their old behavior). NULL = no limit.
+    item_cols = {r[1] for r in conn.execute("PRAGMA table_info(items)").fetchall()}
+    if "time_limit_seconds" not in item_cols:
+        conn.execute(
+            "ALTER TABLE items "
+            "ADD COLUMN time_limit_seconds INTEGER DEFAULT 86400"
+        )
+
+    # How the item closed: all_voted | timeout | early. NULL for items that
+    # pre-date this field or for items still pending.
+    if "close_reason" not in item_cols:
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN close_reason TEXT"
         )
 
     # Old 'dunno' votes become 'skip'.
@@ -395,22 +413,40 @@ def create_item(
     note: str,
     created_by: str,
     voting_rule: str = "keep_wins",
+    time_limit_seconds=86400,
 ) -> dict:
+    """Create a new item.
+
+    time_limit_seconds: int seconds until timeout (default 24h), or None for
+    no time limit at all (only way to close the item is a manual finish or
+    everyone voting).
+    """
     if voting_rule not in ("keep_wins", "majority"):
         voting_rule = "keep_wins"
     if not get_household(household_id):
         raise ValueError("household not found")
+    # Normalize time limit: None or <=0 means "no limit"; positive int stands.
+    if time_limit_seconds is None:
+        tls = None
+    else:
+        try:
+            tls = int(time_limit_seconds)
+            if tls <= 0:
+                tls = None
+        except (TypeError, ValueError):
+            tls = 86400
     iid = new_id()
     ts = now()
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO items
                (id, household_id, photo_path, title, note, created_by,
-                created_at, round, round_started_at, status, voting_rule)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', ?)""",
+                created_at, round, round_started_at, status, voting_rule,
+                time_limit_seconds)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 'pending', ?, ?)""",
             (
                 iid, household_id, photo_path, title, note, created_by,
-                ts, ts, voting_rule,
+                ts, ts, voting_rule, tls,
             ),
         )
     return get_item(iid)
@@ -637,14 +673,30 @@ def is_locked(household_id: str) -> bool:
 
 # ---------- decision logic ----------
 
+def _decide(item: dict, real_votes: list) -> str:
+    """Apply the item's voting_rule to a set of real (keep/toss) votes."""
+    choices = [v["choice"] for v in real_votes]
+    rule = item.get("voting_rule") or "keep_wins"
+    if rule == "majority":
+        keeps = choices.count("keep")
+        tosses = choices.count("toss")
+        return "kept" if keeps >= tosses else "tossed"
+    return "kept" if "keep" in choices else "tossed"
+
+
 def finalize_if_ready(item_id: str):
     """Close the item if enough real votes have come in (or the timer expired).
 
     Closing condition:
       - household is locked AND every expected member has voted keep/toss, OR
-      - 24h has elapsed AND at least one real vote exists.
+      - the item's time_limit_seconds has elapsed AND at least one real vote
+        exists.
 
-    Decision follows the item's voting_rule.
+    If the item has time_limit_seconds = NULL, the timer branch is disabled
+    entirely — only "everyone voted" or a manual finish can close it.
+
+    Decision follows the item's voting_rule. Sets close_reason to either
+    'all_voted' or 'timeout' depending on which path closed it.
     """
     item = get_item(item_id)
     if not item or item["status"] != "pending":
@@ -656,34 +708,51 @@ def finalize_if_ready(item_id: str):
     expected = get_expected_voters(item["household_id"])
 
     all_voted = expected > 0 and real_voter_count >= expected
-    time_up = (now() - item["round_started_at"]) >= ROUND_TIMEOUT_SECONDS
+
+    time_limit = item.get("time_limit_seconds")
+    if time_limit is None or time_limit <= 0:
+        time_up = False
+    else:
+        time_up = (now() - item["round_started_at"]) >= time_limit
 
     if not (all_voted or time_up):
         return None
 
     if real_voter_count == 0:
+        # Only the timer could have fired. Reset it so the item survives.
         _extend_round(item_id)
         return None
 
-    choices = [v["choice"] for v in real_votes]
-    rule = item.get("voting_rule") or "keep_wins"
-
-    if rule == "majority":
-        keeps = choices.count("keep")
-        tosses = choices.count("toss")
-        outcome = "kept" if keeps >= tosses else "tossed"
-    else:
-        outcome = "kept" if "keep" in choices else "tossed"
-
-    _set_status(item_id, outcome)
-    return {"item_id": item_id, "outcome": outcome}
+    outcome = _decide(item, real_votes)
+    reason = "all_voted" if all_voted else "timeout"
+    _set_status(item_id, outcome, reason)
+    return {"item_id": item_id, "outcome": outcome, "close_reason": reason}
 
 
-def _set_status(item_id: str, status: str) -> None:
+def finalize_early(item_id: str):
+    """Close an item right now with whatever real votes exist.
+
+    Returns None if no real votes have been cast yet (caller should surface
+    a user-facing error). Marks close_reason = 'early'.
+    """
+    item = get_item(item_id)
+    if not item or item["status"] != "pending":
+        return None
+    votes = get_votes_for_round(item_id, item["round"])
+    real_votes = [v for v in votes if v["choice"] in ("keep", "toss")]
+    if not real_votes:
+        return None
+    outcome = _decide(item, real_votes)
+    _set_status(item_id, outcome, "early")
+    return {"item_id": item_id, "outcome": outcome, "close_reason": "early"}
+
+
+def _set_status(item_id: str, status: str, close_reason: str = None) -> None:
     with get_conn() as conn:
         conn.execute(
-            "UPDATE items SET status = ?, decided_at = ? WHERE id = ?",
-            (status, now(), item_id),
+            "UPDATE items SET status = ?, decided_at = ?, close_reason = ? "
+            "WHERE id = ?",
+            (status, now(), close_reason, item_id),
         )
 
 
@@ -696,11 +765,16 @@ def _extend_round(item_id: str) -> None:
 
 
 def finalize_all_timed_out() -> list:
-    cutoff = now() - ROUND_TIMEOUT_SECONDS
+    """Sweep for items whose per-item time limit has elapsed and close them."""
+    ts = now()
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id FROM items WHERE status = 'pending' AND round_started_at < ?",
-            (cutoff,),
+            """SELECT id FROM items
+               WHERE status = 'pending'
+                 AND time_limit_seconds IS NOT NULL
+                 AND time_limit_seconds > 0
+                 AND (round_started_at + time_limit_seconds) <= ?""",
+            (ts,),
         ).fetchall()
         ids = [r["id"] for r in rows]
     results = []

@@ -40,6 +40,7 @@ SAFE_PHOTO_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 USER_ID_PATH_RE = re.compile(r"^/api/users/([A-Za-z0-9]+)$")
 ITEM_ID_PATH_RE = re.compile(r"^/api/items/([A-Za-z0-9]+)$")
+ITEM_FINALIZE_PATH_RE = re.compile(r"^/api/items/([A-Za-z0-9]+)/finalize-now$")
 HH_ID_PATH_RE = re.compile(r"^/api/households/([A-Za-z0-9]+)$")
 HH_CODE_PATH_RE = re.compile(r"^/api/households/by-code/([A-Za-z0-9\-]+)$")
 
@@ -207,6 +208,20 @@ def create_item_from_multipart(environ) -> tuple:
     voting_rule = form.getvalue("voting_rule") or "keep_wins"
     if voting_rule not in ("keep_wins", "majority"):
         voting_rule = "keep_wins"
+    # time_limit_seconds: int seconds, "0"/"none"/empty/missing -> no limit,
+    # unparseable -> 24h default.
+    tl_raw = form.getvalue("time_limit_seconds")
+    if tl_raw is None or tl_raw == "":
+        time_limit_seconds = 86400
+    elif str(tl_raw).lower() in ("0", "none", "null"):
+        time_limit_seconds = None
+    else:
+        try:
+            time_limit_seconds = int(tl_raw)
+            if time_limit_seconds <= 0:
+                time_limit_seconds = None
+        except (TypeError, ValueError):
+            time_limit_seconds = 86400
 
     if "photo" not in form:
         return json_resp(400, {"error": "missing photo"})
@@ -228,7 +243,11 @@ def create_item_from_multipart(environ) -> tuple:
     with open(out_path, "wb") as f:
         f.write(photo_bytes)
 
-    item = db.create_item(hh_id, new_name, title, note, user_id, voting_rule=voting_rule)
+    item = db.create_item(
+        hh_id, new_name, title, note, user_id,
+        voting_rule=voting_rule,
+        time_limit_seconds=time_limit_seconds,
+    )
     item = db.item_with_tally(item["id"])
     return json_resp(200, {"item": item})
 
@@ -355,6 +374,16 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
 
         if path == "/api/items":
             return create_item_from_multipart(environ)
+
+        m = ITEM_FINALIZE_PATH_RE.match(path)
+        if m:
+            result = db.finalize_early(m.group(1))
+            if not result:
+                return json_resp(
+                    400,
+                    {"error": "need at least one keep or toss vote to finish"},
+                )
+            return json_resp(200, {"ok": True, "outcome": result})
 
         if path == "/api/items/clear-done":
             data = read_json(environ)

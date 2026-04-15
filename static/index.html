@@ -137,6 +137,18 @@
           </div>
         </label>
       </div>
+      <div class="rule-picker">
+        <div class="label">Time limit</div>
+        <select id="time-limit-select" class="time-limit-select">
+          <option value="3600">1 hour</option>
+          <option value="21600">6 hours</option>
+          <option value="86400" selected>24 hours (default)</option>
+          <option value="259200">3 days</option>
+          <option value="604800">1 week</option>
+          <option value="none">No time limit</option>
+        </select>
+        <div class="rule-desc muted">If this time elapses before everyone has voted, the item closes with whatever real votes exist.</div>
+      </div>
       <button id="btn-submit-item" type="button" disabled>Add to the pile</button>
       <p id="add-status" class="status" hidden></p>
     </div>
@@ -256,6 +268,7 @@
           </div>
           <p class="muted" id="modal-my-vote-hint" style="font-size:12px; margin:6px 0 0;"></p>
         </div>
+        <button id="modal-finalize-early" class="modal-finalize-early" type="button" hidden>Finish voting now</button>
         <button id="modal-delete" class="modal-delete" type="button" hidden>Delete this item</button>
       </div>
     </div>
