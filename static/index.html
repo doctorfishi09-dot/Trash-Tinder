@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#14151a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Trash Tinder">
+<title>Trash Tinder</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Fixed top header shown in every in-app view -->
+  <header id="app-header" class="app-header" hidden>
+    <button id="household-pill" class="household-pill" type="button">
+      <span class="hh-label">household</span>
+      <span id="household-name" class="hh-name">—</span>
+      <span class="hh-arrow">&#9662;</span>
+    </button>
+    <div class="me-chip">Hi, <span id="me-name">—</span></div>
+  </header>
+
+  <!-- LOBBY: create or join -->
+  <section class="view" id="view-lobby">
+    <div class="login-box">
+      <h1 class="brand">Trash Tinder</h1>
+      <p class="subtitle">Decide together what stays and what goes.</p>
+
+      <div class="lobby-section">
+        <h2 class="label">Join a household</h2>
+        <div class="new-user">
+          <input id="join-code-input" type="text" placeholder="M4G-7XP"
+                 maxlength="12" autocomplete="off"
+                 autocapitalize="characters" spellcheck="false">
+          <button id="btn-join-code" type="button">Join</button>
+        </div>
+        <p id="join-error" class="err" hidden></p>
+      </div>
+
+      <div class="lobby-divider"><span>or</span></div>
+
+      <div class="lobby-section">
+        <h2 class="label">Start a new one</h2>
+        <div class="new-user">
+          <input id="create-name-input" type="text"
+                 placeholder="e.g. Schmidt house" maxlength="80" autocomplete="off">
+          <button id="btn-create-household" type="button">Create</button>
+        </div>
+        <p id="create-error" class="err" hidden></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- NAME: pick your display name for the joined household -->
+  <section class="view" id="view-name" hidden>
+    <div class="login-box">
+      <h1 class="brand" id="name-brand">Joining</h1>
+      <p class="subtitle" id="name-subtitle">&nbsp;</p>
+      <h2 class="label">What should we call you here?</h2>
+      <div class="new-user">
+        <input id="display-name-input" type="text" placeholder="Your name"
+               maxlength="50" autocomplete="off">
+        <button id="btn-pick-name" type="button">Enter</button>
+      </div>
+      <p id="name-error" class="err" hidden></p>
+      <p id="name-hint" class="muted" style="font-size:12px; margin-top:14px;"></p>
+      <button id="btn-cancel-name" class="secondary" type="button"
+              style="margin-top:18px">Back</button>
+    </div>
+  </section>
+
+  <!-- DECK -->
+  <section class="view" id="view-deck" hidden>
+    <header class="view-header">
+      <div class="count"><span id="deck-count">0</span> waiting</div>
+    </header>
+    <div class="banner" id="banner-unlocked" hidden>
+      <div><b>Setup mode.</b> Votes are collected but nothing will be decided until everyone is here.</div>
+      <button id="banner-lock-btn" type="button" class="link-btn">We're all here &rarr;</button>
+    </div>
+    <div class="deck-area">
+      <div id="card-stack" class="card-stack"></div>
+      <div id="empty-deck" class="empty" hidden>
+        <div class="big">All caught up</div>
+        <div class="muted">No items to vote on. Add one from the <b>Add</b> tab.</div>
+      </div>
+    </div>
+    <div class="action-row">
+      <button class="act toss" data-act="toss" type="button">
+        <span class="act-label">Toss</span>
+      </button>
+      <button class="act skip" data-act="skip" type="button">
+        <span class="act-label">Not sure</span>
+      </button>
+      <button class="act keep" data-act="keep" type="button">
+        <span class="act-label">Keep</span>
+      </button>
+    </div>
+    <p class="hint muted">Swipe left to toss, right to keep, up if you're unsure.</p>
+  </section>
+
+  <!-- ADD -->
+  <section class="view" id="view-add" hidden>
+    <header class="view-header"><div>Add an item</div></header>
+    <div class="add-box">
+      <label class="photo-picker" for="photo-input">
+        <input id="photo-input" type="file" accept="image/*" capture="environment" hidden>
+        <div id="photo-placeholder" class="photo-placeholder">
+          <div class="big">Tap to take photo</div>
+          <div class="muted">of the item you're unsure about</div>
+        </div>
+        <img id="photo-preview" class="photo-preview" alt="" hidden>
+      </label>
+      <input id="item-title" type="text" placeholder="What is it? (optional)" maxlength="100" autocomplete="off">
+      <textarea id="item-note" placeholder="Notes: why, context, who owns it... (optional)" maxlength="500"></textarea>
+      <div class="rule-picker">
+        <div class="label">How should this be decided?</div>
+        <label class="rule-opt">
+          <input type="radio" name="voting-rule" value="keep_wins" checked>
+          <div>
+            <div class="rule-title">One keep saves it <span class="muted">(default)</span></div>
+            <div class="rule-desc muted">If anyone wants to keep it, it stays.</div>
+          </div>
+        </label>
+        <label class="rule-opt">
+          <input type="radio" name="voting-rule" value="majority">
+          <div>
+            <div class="rule-title">Majority wins</div>
+            <div class="rule-desc muted">More keeps than tosses &rarr; kept. Ties go to kept.</div>
+          </div>
+        </label>
+      </div>
+      <button id="btn-submit-item" type="button" disabled>Add to the pile</button>
+      <p id="add-status" class="status" hidden></p>
+    </div>
+  </section>
+
+  <!-- ONGOING -->
+  <section class="view" id="view-ongoing" hidden>
+    <header class="view-header"><div>Ongoing votes</div></header>
+    <div id="ongoing-list" class="ongoing-list">
+      <div class="empty muted">Nothing is being voted on right now.</div>
+    </div>
+  </section>
+
+  <!-- HISTORY -->
+  <section class="view" id="view-history" hidden>
+    <header class="view-header"><div>Done</div></header>
+    <div id="history-list" class="history-list">
+      <div class="empty muted">Nothing decided yet.</div>
+    </div>
+  </section>
+
+  <!-- WHO -->
+  <section class="view" id="view-who" hidden>
+    <header class="view-header"><div>Household</div></header>
+
+    <div class="invite-box">
+      <div class="label">Invite code</div>
+      <div class="invite-code-row">
+        <code id="invite-code">—</code>
+        <button id="btn-copy-code" class="secondary" type="button">Copy</button>
+      </div>
+      <p class="muted" style="font-size:12px; margin:6px 0 0;">
+        Share this code with anyone you want to join this household.
+      </p>
+    </div>
+
+    <div id="lock-box" class="lock-box">
+      <div class="lock-status">
+        <div class="lock-title" id="lock-title">Setup mode</div>
+        <div class="lock-desc muted" id="lock-desc">Waiting for everyone to register.</div>
+      </div>
+      <button id="btn-lock" type="button" class="lock-btn">Start voting</button>
+    </div>
+
+    <h3 class="label">Who's in</h3>
+    <div id="users-list" class="users-list"></div>
+
+    <div class="stats-box">
+      <div><span id="stat-pending">0</span><small>waiting</small></div>
+      <div><span id="stat-kept">0</span><small>kept</small></div>
+      <div><span id="stat-tossed">0</span><small>tossed</small></div>
+    </div>
+
+    <button id="btn-rename-household" type="button" class="secondary">Rename this household</button>
+    <button id="btn-clear-done" type="button" class="secondary">Clear all done items</button>
+    <button id="btn-leave-household" type="button" class="secondary danger">Leave this household</button>
+  </section>
+
+  <!-- TAB BAR -->
+  <nav class="tab-bar" id="tab-bar" hidden>
+    <button data-view="deck" class="tab" type="button">Swipe</button>
+    <button data-view="add" class="tab" type="button">Add</button>
+    <button data-view="ongoing" class="tab" type="button">Ongoing</button>
+    <button data-view="history" class="tab" type="button">Done</button>
+    <button data-view="who" class="tab" type="button">Who</button>
+  </nav>
+
+  <!-- HOUSEHOLD SWITCHER MODAL -->
+  <div id="switcher-modal" class="modal" hidden>
+    <div class="modal-backdrop" id="switcher-backdrop"></div>
+    <div class="modal-sheet">
+      <button class="modal-close" id="switcher-close" type="button">Close</button>
+      <div class="modal-body">
+        <h2>Your households</h2>
+        <div id="memberships-list" class="memberships-list"></div>
+
+        <h3 class="label">Join another with a code</h3>
+        <div class="new-user">
+          <input id="switcher-join-code" type="text" placeholder="M4G-7XP"
+                 maxlength="12" autocomplete="off"
+                 autocapitalize="characters" spellcheck="false">
+          <button id="switcher-join-btn" type="button">Join</button>
+        </div>
+        <p id="switcher-join-error" class="err" hidden></p>
+
+        <h3 class="label">Create a new one</h3>
+        <div class="new-user">
+          <input id="switcher-create-name" type="text"
+                 placeholder="Household name" maxlength="80" autocomplete="off">
+          <button id="switcher-create-btn" type="button">Create</button>
+        </div>
+        <p id="switcher-create-error" class="err" hidden></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ITEM DETAIL MODAL -->
+  <div id="item-modal" class="modal" hidden>
+    <div class="modal-backdrop" id="modal-backdrop"></div>
+    <div class="modal-sheet">
+      <button class="modal-close" id="modal-close" type="button">Close</button>
+      <img id="modal-photo" class="modal-photo" alt="">
+      <div class="modal-body">
+        <div id="modal-status-row" class="modal-status-row"></div>
+        <h2 id="modal-title">&nbsp;</h2>
+        <div id="modal-note" class="muted"></div>
+        <div id="modal-meta" class="muted"></div>
+        <div id="modal-rule" class="modal-rule"></div>
+        <h3 class="label">Votes</h3>
+        <div id="modal-votes" class="vote-list"></div>
+        <div id="modal-my-vote" class="my-vote" hidden>
+          <div class="label">Your vote</div>
+          <div class="my-vote-row">
+            <button class="my-vote-btn keep" data-choice="keep" type="button">Keep</button>
+            <button class="my-vote-btn toss" data-choice="toss" type="button">Toss</button>
+            <button class="my-vote-btn skip" data-choice="skip" type="button">Skip</button>
+          </div>
+          <p class="muted" id="modal-my-vote-hint" style="font-size:12px; margin:6px 0 0;"></p>
+        </div>
+        <button id="modal-delete" class="modal-delete" type="button" hidden>Delete this item</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TOAST -->
+  <div id="toast" class="toast" hidden></div>
+
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

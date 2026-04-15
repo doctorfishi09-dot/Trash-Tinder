@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Claude Code local config
+.claude/
+
+# Runtime data — database and uploaded photos are created fresh on each host
+# and should never be committed.
+data/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# PWA Builder output / Android packaging artifacts — keep the signing key
+# and build artefacts out of the repo.
+TrashTinder - Google Play package/
+TrashTinder - Google Play package.zip
+*.apk
+*.aab
+*.keystore
