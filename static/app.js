@@ -1303,6 +1303,21 @@ function stopPolling() {
 }
 
 // ---------- boot ----------
+function readHouseholdFromUrl() {
+  try {
+    const sp = new URLSearchParams(window.location.search);
+    const v = sp.get('household');
+    if (v) {
+      // Strip the param so a manual reload doesn't keep yanking the user back.
+      sp.delete('household');
+      const qs = sp.toString();
+      const newUrl = window.location.pathname + (qs ? ('?' + qs) : '') + window.location.hash;
+      window.history.replaceState({}, '', newUrl);
+    }
+    return v || null;
+  } catch { return null; }
+}
+
 async function boot() {
   const { memberships, lastUsed } = loadMemberships();
   state.memberships = memberships;
@@ -1314,7 +1329,10 @@ async function boot() {
     return;
   }
 
-  const target = (lastUsed && memberships[lastUsed]) ? lastUsed : hhIds[0];
+  const fromUrl = readHouseholdFromUrl();
+  const target = (fromUrl && memberships[fromUrl])
+    ? fromUrl
+    : ((lastUsed && memberships[lastUsed]) ? lastUsed : hhIds[0]);
   const ok = await switchToHousehold(target);
   if (ok) return;
 
@@ -1332,6 +1350,15 @@ async function boot() {
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const msg = event.data || {};
+    if (msg.type === 'switch_household' && msg.household_id) {
+      if (state.currentHousehold && state.currentHousehold.id === msg.household_id) return;
+      if (state.memberships && state.memberships[msg.household_id]) {
+        switchToHousehold(msg.household_id);
+      }
+    }
+  });
 }
 
 boot();

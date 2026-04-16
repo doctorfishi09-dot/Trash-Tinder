@@ -63,7 +63,12 @@ self.addEventListener('push', event => {
     body: data.body || '',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    data: { url: data.url || '/', item_id: data.item_id || null, kind: data.kind || null },
+    data: {
+      url: data.url || '/',
+      item_id: data.item_id || null,
+      household_id: data.household_id || null,
+      kind: data.kind || null,
+    },
     tag: data.kind === 'deadline_warning' && data.item_id ? ('deadline-' + data.item_id) : undefined,
   };
   event.waitUntil(self.registration.showNotification(title, opts));
@@ -71,19 +76,23 @@ self.addEventListener('push', event => {
 
 self.addEventListener('notificationclick', event => {
   event.notification.close();
-  const target = (event.notification.data && event.notification.data.url) || '/';
+  const data = event.notification.data || {};
+  const householdId = data.household_id || null;
+  const fallbackUrl = householdId ? ('/?household=' + encodeURIComponent(householdId)) : (data.url || '/');
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async list => {
       for (const client of list) {
-        // Same-origin window already open — focus it.
         try {
           const u = new URL(client.url);
           if (u.origin === self.location.origin) {
+            if (householdId) {
+              client.postMessage({ type: 'switch_household', household_id: householdId });
+            }
             return client.focus();
           }
         } catch (e) { /* ignore */ }
       }
-      return self.clients.openWindow(target);
+      return self.clients.openWindow(fallbackUrl);
     })
   );
 });

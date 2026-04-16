@@ -75,7 +75,8 @@ def maybe_sweep_timeouts() -> None:
             return
         _last_sweep_at[0] = now_ts
     try:
-        db.finalize_all_timed_out()
+        outcomes = db.finalize_all_timed_out()
+        push.notify_outcomes(outcomes)
     except Exception:
         traceback.print_exc()
     try:
@@ -385,7 +386,13 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
                 return json_resp(400, {"error": "unknown household"})
             if not name or len(name) > 50:
                 return json_resp(400, {"error": "invalid name"})
+            existed = db.get_user_by_name(hh_id, name)
             user = db.create_or_get_user(hh_id, name)
+            if not existed and user:
+                try:
+                    push.notify_member_joined(hh_id, user["id"])
+                except Exception:
+                    traceback.print_exc()
             return json_resp(200, {"user": user})
 
         if path == "/api/items":
@@ -399,6 +406,10 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
                     400,
                     {"error": "need at least one keep or toss vote to finish"},
                 )
+            try:
+                push.notify_outcomes([result])
+            except Exception:
+                traceback.print_exc()
             return json_resp(200, {"ok": True, "outcome": result})
 
         if path == "/api/items/clear-done":
@@ -425,7 +436,11 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
                 if count == 0:
                     return json_resp(400, {"error": "no users to lock"})
                 db.set_expected_voters(hh_id, count)
-                db.finalize_all_pending(hh_id)
+                outcomes = db.finalize_all_pending(hh_id)
+                try:
+                    push.notify_outcomes(outcomes)
+                except Exception:
+                    traceback.print_exc()
             else:
                 db.set_expected_voters(hh_id, 0)
             return json_resp(200, {"config": config_snapshot(hh_id)})
@@ -443,6 +458,11 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
             if not ok:
                 return json_resp(400, {"error": "vote rejected"})
             outcome = db.finalize_if_ready(item_id)
+            if outcome:
+                try:
+                    push.notify_outcomes([outcome])
+                except Exception:
+                    traceback.print_exc()
             return json_resp(200, {"ok": True, "outcome": outcome})
 
         if path == "/api/push/subscribe":
@@ -499,6 +519,10 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
             if not result["ok"]:
                 return json_resp(404, {"error": "user not found"})
             hh_id = result["household_id"]
+            try:
+                push.notify_outcomes(result.get("outcomes", []))
+            except Exception:
+                traceback.print_exc()
             return json_resp(
                 200,
                 {

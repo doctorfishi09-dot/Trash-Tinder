@@ -161,6 +161,11 @@ def send_to_subscriptions(subs: list, payload: dict) -> int:
 
 # ---------- high-level triggers ----------
 
+def _household_name(household_id: str) -> str:
+    hh = db.get_household(household_id)
+    return hh["name"] if hh else ""
+
+
 def notify_new_item(item: dict, household_id: str, creator_user_id: str) -> None:
     """Fire a 'someone added an item' push to everyone in the household
     except the user who just added it."""
@@ -174,11 +179,12 @@ def notify_new_item(item: dict, household_id: str, creator_user_id: str) -> None
     creator = db.get_user_by_id(creator_user_id)
     creator_name = creator["name"] if creator else "Someone"
     title_part = item.get("title") or "a new item"
+    hh_name = _household_name(household_id)
     payload = {
         "kind": "new_item",
-        "title": "New item to vote on",
+        "title": f"New item in {hh_name}" if hh_name else "New item to vote on",
         "body": f"{creator_name} added {title_part}.",
-        "url": "/",
+        "household_id": household_id,
         "item_id": item["id"],
     }
     send_to_subscriptions(subs, payload)
@@ -196,12 +202,76 @@ def notify_deadline_warning(item: dict) -> int:
     if not subs:
         return 0
     title_part = item.get("title") or "an item"
+    hh_name = _household_name(item.get("household_id", ""))
     payload = {
         "kind": "deadline_warning",
-        "title": "Voting closes in 1 hour",
+        "title": f"Voting closes in 1 hour ({hh_name})" if hh_name else "Voting closes in 1 hour",
         "body": f"You haven't voted on {title_part} yet.",
-        "url": "/",
+        "household_id": item.get("household_id"),
         "item_id": item["id"],
+    }
+    return send_to_subscriptions(subs, payload)
+
+
+def notify_item_decided(item_id: str) -> int:
+    """Push the result of a closed item to everyone in the household."""
+    if not is_available():
+        return 0
+    item = db.item_with_tally(item_id)
+    if not item or item.get("status") not in ("kept", "tossed"):
+        return 0
+    hh_id = item["household_id"]
+    subs = db.list_push_subscriptions_for_household(hh_id)
+    if not subs:
+        return 0
+    title_part = item.get("title") or "an item"
+    tally = item.get("tally") or {}
+    keeps = tally.get("keep", 0)
+    tosses = tally.get("toss", 0)
+    verdict = "kept" if item["status"] == "kept" else "tossed"
+    hh_name = _household_name(hh_id)
+    payload = {
+        "kind": "item_decided",
+        "title": f"{title_part} was {verdict}" if title_part != "an item" else f"An item was {verdict}",
+        "body": f"{keeps} keep · {tosses} toss" + (f" — {hh_name}" if hh_name else ""),
+        "household_id": hh_id,
+        "item_id": item_id,
+    }
+    return send_to_subscriptions(subs, payload)
+
+
+def notify_outcomes(outcomes) -> None:
+    """Convenience: take a list of {item_id, outcome, ...} dicts (as returned
+    by db.finalize_* helpers) and fire item_decided pushes for each."""
+    for o in outcomes or []:
+        if not o:
+            continue
+        item_id = o.get("item_id")
+        if item_id:
+            try:
+                notify_item_decided(item_id)
+            except Exception:
+                traceback.print_exc()
+
+
+def notify_member_joined(household_id: str, new_user_id: str) -> int:
+    """Push 'X joined the household' to every existing member except the
+    person who just joined."""
+    if not is_available():
+        return 0
+    subs = db.list_push_subscriptions_for_household(
+        household_id, exclude_user_id=new_user_id
+    )
+    if not subs:
+        return 0
+    user = db.get_user_by_id(new_user_id)
+    name = user["name"] if user else "Someone"
+    hh_name = _household_name(household_id)
+    payload = {
+        "kind": "member_joined",
+        "title": f"{name} joined {hh_name}" if hh_name else f"{name} joined",
+        "body": "Say hi in the Who tab.",
+        "household_id": household_id,
     }
     return send_to_subscriptions(subs, payload)
 
