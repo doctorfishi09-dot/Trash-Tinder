@@ -44,25 +44,49 @@ def is_available() -> bool:
     return _HAS_PYWEBPUSH and _HAS_VAPID
 
 
-def _generate_vapid_pair() -> tuple:
-    """Make a fresh VAPID keypair. (private_pem_str, public_b64url_str)."""
-    vapid = Vapid01()
-    vapid.generate_keys()
-    private_pem = vapid.private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
+def _der_to_b64url(der_bytes: bytes) -> str:
+    return base64.urlsafe_b64encode(der_bytes).rstrip(b"=").decode("ascii")
+
+
+def _private_to_b64url_der(private_key) -> str:
+    """Serialize a cryptography EC private key to base64url-DER (the format
+    pywebpush's `vapid_private_key` parameter actually accepts)."""
+    der = private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
+    )
+    return _der_to_b64url(der)
+
+
+def _generate_vapid_pair() -> tuple:
+    """Make a fresh VAPID keypair. (private_b64url_der, public_b64url_str)."""
+    vapid = Vapid01()
+    vapid.generate_keys()
+    priv_b64 = _private_to_b64url_der(vapid.private_key)
     public_raw = vapid.public_key.public_bytes(
         encoding=serialization.Encoding.X962,
         format=serialization.PublicFormat.UncompressedPoint,
     )
     public_b64 = base64.urlsafe_b64encode(public_raw).rstrip(b"=").decode("ascii")
-    return private_pem, public_b64
+    return priv_b64, public_b64
+
+
+def _normalize_stored_private(stored: str) -> str:
+    """Old code stored the private key as a PEM string, but pywebpush wants
+    base64url-encoded DER. Convert PEM in place; pass through anything that
+    already looks like base64url. Keeps the public key intact so existing
+    subscriptions keep working."""
+    if stored and "-----BEGIN" in stored:
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        key = load_pem_private_key(stored.encode("utf-8"), password=None)
+        return _private_to_b64url_der(key)
+    return stored
 
 
 def _load_or_create_keys():
-    """Return (private_pem, public_b64). Creates on first call. Cached in-process."""
+    """Return (private_b64url, public_b64url). Creates on first call.
+    Cached in-process."""
     if _cached_keys["private_pem"] and _cached_keys["public_b64"]:
         return _cached_keys["private_pem"], _cached_keys["public_b64"]
     with _keys_lock:
@@ -76,6 +100,11 @@ def _load_or_create_keys():
             priv, pub = _generate_vapid_pair()
             db.set_setting("vapid_private_key", priv)
             db.set_setting("vapid_public_key", pub)
+        elif _HAS_VAPID:
+            normalized = _normalize_stored_private(priv)
+            if normalized != priv:
+                db.set_setting("vapid_private_key", normalized)
+                priv = normalized
         _cached_keys["private_pem"] = priv
         _cached_keys["public_b64"] = pub
         return priv, pub
