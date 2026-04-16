@@ -550,16 +550,27 @@ document.getElementById('banner-lock-btn').addEventListener('click', toggleLock)
 const cardStack = document.getElementById('card-stack');
 const emptyDeck = document.getElementById('empty-deck');
 let voteInFlight = false;
+// Votes that have been applied optimistically but not yet confirmed by the
+// server. While > 0, polling skips the deck refresh so the in-flight vote
+// doesn't cause the swiped card to flicker back into view.
+let votePending = 0;
 
 async function refreshDeck() {
   if (!state.currentUser) return;
+  // Cache-first paint so the deck never flashes empty on tab switch.
+  if (state.deck && state.deck.length) {
+    document.getElementById('deck-count').textContent = state.deck.length;
+    renderDeck();
+  }
   try {
-    state.deck = await api.deck(state.currentUser.id);
-    if (state.currentHousehold) {
-      state.users = await api.listUsers(state.currentHousehold.id);
-    }
-  } catch { state.deck = []; }
-  document.getElementById('deck-count').textContent = state.deck.length;
+    const [deck, users] = await Promise.all([
+      api.deck(state.currentUser.id),
+      state.currentHousehold ? api.listUsers(state.currentHousehold.id) : Promise.resolve(state.users || []),
+    ]);
+    state.deck = deck;
+    state.users = users;
+  } catch { /* keep stale state */ }
+  document.getElementById('deck-count').textContent = (state.deck || []).length;
   renderDeck();
 }
 
@@ -676,7 +687,7 @@ function attachSwipe(card, item) {
   card.addEventListener('pointercancel', onUp);
 }
 
-async function commitSwipe(card, item, decision, dx, dy) {
+function commitSwipe(card, item, decision, dx, dy) {
   if (voteInFlight || !state.currentUser) return;
   voteInFlight = true;
   setActionsEnabled(false);
@@ -686,21 +697,44 @@ async function commitSwipe(card, item, decision, dx, dy) {
   card.style.transition = 'transform 0.35s ease, opacity 0.35s ease';
   card.style.transform = `translate(${flyX}px, ${flyY}px) rotate(${rot}deg)`;
   card.style.opacity = '0';
-  try {
-    const res = await api.vote(item.id, state.currentUser.id, decision);
-    if (decision === 'skip') toast('Saved for later');
-    if (res.outcome) {
-      const o = res.outcome.outcome;
-      if (o === 'kept') toast('Kept — decision reached');
-      else if (o === 'tossed') toast('Tossed — decision reached');
+
+  // Optimistic: rebuild the stack with the next card while the network call
+  // is still in flight, so the user never has to wait on PA's round-trip.
+  setTimeout(() => {
+    const idx = state.deck.findIndex(i => i.id === item.id);
+    if (idx >= 0) {
+      const [removed] = state.deck.splice(idx, 1);
+      if (decision === 'skip') {
+        // Skips stay in the deck, just shuffle to the back.
+        removed.my_vote = 'skip';
+        state.deck.push(removed);
+      }
     }
-  } catch (e) {
-    toast(e.message);
-  } finally {
+    document.getElementById('deck-count').textContent = state.deck.length;
+    renderDeck();
     voteInFlight = false;
-    state.deck = state.deck.filter(i => i.id !== item.id);
-    await refreshDeck();
-  }
+  }, 180);
+
+  votePending++;
+  api.vote(item.id, state.currentUser.id, decision)
+    .then(res => {
+      if (decision === 'skip') toast('Saved for later');
+      if (res && res.outcome) {
+        const o = res.outcome.outcome;
+        if (o === 'kept') toast('Kept — decision reached');
+        else if (o === 'tossed') toast('Tossed — decision reached');
+      }
+    })
+    .catch(e => {
+      // Server rejected the vote — put the card back at the front.
+      if (!state.deck.find(i => i.id === item.id)) {
+        state.deck.unshift(item);
+        document.getElementById('deck-count').textContent = state.deck.length;
+        renderDeck();
+      }
+      toast('Vote failed: ' + (e.message || 'error'));
+    })
+    .finally(() => { votePending = Math.max(0, votePending - 1); });
 }
 
 document.querySelectorAll('.act').forEach(btn => {
@@ -762,62 +796,57 @@ async function resizeImage(file, maxDim, quality) {
   });
 }
 
-submitBtn.addEventListener('click', async () => {
+submitBtn.addEventListener('click', () => {
   if (!state.currentUser || !state.pendingPhoto) return;
   const ruleInput = document.querySelector('input[name="voting-rule"]:checked');
   const rule = ruleInput ? ruleInput.value : 'keep_wins';
   const tlSelect = document.getElementById('time-limit-select');
   const tlRaw = tlSelect ? tlSelect.value : '86400';
   const timeLimit = tlRaw === 'none' ? 'none' : parseInt(tlRaw, 10);
+
+  // Snapshot the form values, then clear the form and jump back to the deck
+  // immediately. The upload runs in the background.
+  const blob = state.pendingPhoto;
+  const title = itemTitle.value.trim();
+  const note = itemNote.value.trim();
+
+  state.pendingPhoto = null;
+  itemTitle.value = '';
+  itemNote.value = '';
+  photoInput.value = '';
+  photoPreview.hidden = true;
+  photoPlaceholder.hidden = false;
+  const defaultRule = document.querySelector('input[name="voting-rule"][value="keep_wins"]');
+  if (defaultRule) defaultRule.checked = true;
+  if (tlSelect) tlSelect.value = '86400';
   submitBtn.disabled = true;
-  addStatus.hidden = false;
-  addStatus.className = 'status';
-  addStatus.textContent = 'Uploading...';
-  try {
-    await api.createItem(
-      state.pendingPhoto,
-      itemTitle.value.trim(),
-      itemNote.value.trim(),
-      state.currentUser.id,
-      rule,
-      timeLimit,
-    );
-    addStatus.textContent = 'Added to the pile!';
-    addStatus.className = 'status ok';
-    state.pendingPhoto = null;
-    itemTitle.value = '';
-    itemNote.value = '';
-    photoInput.value = '';
-    photoPreview.hidden = true;
-    photoPlaceholder.hidden = false;
-    const defaultRule = document.querySelector('input[name="voting-rule"][value="keep_wins"]');
-    if (defaultRule) defaultRule.checked = true;
-    if (tlSelect) tlSelect.value = '86400';
-    setTimeout(() => { addStatus.hidden = true; showView('deck'); }, 900);
-  } catch (e) {
-    addStatus.textContent = e.message;
-    addStatus.className = 'status fail';
-    submitBtn.disabled = false;
-  }
+  addStatus.hidden = true;
+
+  toast('Uploading in the background...');
+  showView('deck');
+
+  api.createItem(blob, title, note, state.currentUser.id, rule, timeLimit)
+    .then(() => {
+      toast('Added to the pile');
+      if (state.view === 'deck') refreshDeck();
+    })
+    .catch(e => {
+      toast('Upload failed: ' + (e.message || 'error'));
+    });
 });
 
 // ---------- ongoing ----------
-async function refreshOngoing() {
-  if (!state.currentHousehold) return;
-  try {
-    const all = await api.items(state.currentHousehold.id);
-    state.ongoing = all.filter(i => i.status === 'pending');
-    state.users = await api.listUsers(state.currentHousehold.id);
-  } catch { state.ongoing = []; }
+function renderOngoing() {
   const list = document.getElementById('ongoing-list');
-  if (state.ongoing.length === 0) {
+  const ongoing = state.ongoing || [];
+  if (ongoing.length === 0) {
     list.innerHTML = '<div class="empty muted">Nothing is being voted on right now.</div>';
     return;
   }
   list.innerHTML = '';
-  const total = state.users.length || 1;
-  state.ongoing.forEach(item => {
-    const addedBy = state.users.find(u => u.id === item.created_by)?.name || '?';
+  const total = (state.users || []).length || 1;
+  ongoing.forEach(item => {
+    const addedBy = (state.users || []).find(u => u.id === item.created_by)?.name || '?';
     const voted = item.vote_count || 0;
     const skipped = item.skip_count || 0;
     const pct = Math.min(100, Math.round((voted / total) * 100));
@@ -828,7 +857,7 @@ async function refreshOngoing() {
     row.className = 'ongoing-row';
     const tally = item.tally || { keep: 0, toss: 0, skip: 0 };
     row.innerHTML = `
-      <img src="/photos/${encodeURIComponent(item.photo_path)}" alt="">
+      <img src="/photos/${encodeURIComponent(item.photo_path)}" alt="" loading="lazy">
       <div class="info">
         <div class="title">${escapeHtml(item.title || 'Untitled')}</div>
         <div class="sub">by ${escapeHtml(addedBy)} · ${rulePill}</div>
@@ -844,22 +873,32 @@ async function refreshOngoing() {
   });
 }
 
-// ---------- history ----------
-async function refreshHistory() {
+async function refreshOngoing() {
   if (!state.currentHousehold) return;
+  // Render whatever we have cached so the tab is never blank-on-tap.
+  renderOngoing();
   try {
-    const all = await api.items(state.currentHousehold.id);
-    state.history = all.filter(i => i.status !== 'pending');
-    state.users = await api.listUsers(state.currentHousehold.id);
-  } catch { state.history = []; }
+    const [all, users] = await Promise.all([
+      api.items(state.currentHousehold.id),
+      api.listUsers(state.currentHousehold.id),
+    ]);
+    state.ongoing = all.filter(i => i.status === 'pending');
+    state.users = users;
+  } catch { /* keep stale state on failure */ }
+  renderOngoing();
+}
+
+// ---------- history ----------
+function renderHistory() {
   const list = document.getElementById('history-list');
-  if (state.history.length === 0) {
+  const history = state.history || [];
+  if (history.length === 0) {
     list.innerHTML = '<div class="empty muted">Nothing decided yet.</div>';
     return;
   }
   list.innerHTML = '';
-  state.history.forEach(item => {
-    const addedBy = state.users.find(u => u.id === item.created_by)?.name || '?';
+  history.forEach(item => {
+    const addedBy = (state.users || []).find(u => u.id === item.created_by)?.name || '?';
     const date = new Date((item.decided_at || item.created_at) * 1000)
       .toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
     const earlyPill = item.close_reason === 'early'
@@ -867,7 +906,7 @@ async function refreshHistory() {
     const row = document.createElement('div');
     row.className = 'history-row';
     row.innerHTML = `
-      <img src="/photos/${encodeURIComponent(item.photo_path)}" alt="">
+      <img src="/photos/${encodeURIComponent(item.photo_path)}" alt="" loading="lazy">
       <div class="info">
         <div class="title">${escapeHtml(item.title || 'Untitled')}</div>
         <div class="sub">by ${escapeHtml(addedBy)} · ${date}</div>
@@ -878,6 +917,20 @@ async function refreshHistory() {
     row.addEventListener('click', () => openItemDetail(item.id));
     list.appendChild(row);
   });
+}
+
+async function refreshHistory() {
+  if (!state.currentHousehold) return;
+  renderHistory();
+  try {
+    const [all, users] = await Promise.all([
+      api.items(state.currentHousehold.id),
+      api.listUsers(state.currentHousehold.id),
+    ]);
+    state.history = all.filter(i => i.status !== 'pending');
+    state.users = users;
+  } catch { /* keep stale state on failure */ }
+  renderHistory();
 }
 
 // ---------- who ----------
@@ -1268,21 +1321,20 @@ document.getElementById('modal-delete').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('modal-finalize-early').addEventListener('click', async () => {
+document.getElementById('modal-finalize-early').addEventListener('click', () => {
   if (!state.selectedItemId) return;
   if (!confirm('Finish voting now? The item will be decided with the votes cast so far. This cannot be undone.')) return;
-  try {
-    const res = await api.finalizeEarly(state.selectedItemId);
-    const o = res.outcome && res.outcome.outcome;
-    toast(o === 'kept' ? 'Kept (finished early)' : 'Tossed (finished early)');
-    const fresh = await api.itemDetail(state.selectedItemId);
-    renderItemDetail(fresh);
-    if (state.view === 'ongoing') refreshOngoing();
-    if (state.view === 'history') refreshHistory();
-    if (state.view === 'deck') refreshDeck();
-  } catch (e) {
-    toast(e.message);
-  }
+  const itemId = state.selectedItemId;
+  closeItemDetail();
+  api.finalizeEarly(itemId)
+    .then(res => {
+      const o = res.outcome && res.outcome.outcome;
+      toast(o === 'kept' ? 'Kept (finished early)' : 'Tossed (finished early)');
+      if (state.view === 'ongoing') refreshOngoing();
+      if (state.view === 'history') refreshHistory();
+      if (state.view === 'deck') refreshDeck();
+    })
+    .catch(e => toast(e.message));
 });
 
 // ---------- polling (replaces SSE for WSGI / PythonAnywhere compat) ----------
@@ -1292,11 +1344,15 @@ function startPolling() {
   pollTimer = setInterval(() => {
     if (document.hidden) return;
     if (modal && !modal.hidden) return; // don't refresh while reading detail
-    if (state.view === 'deck') refreshDeck();
+    if (state.view === 'deck') {
+      // Skip the auto-refresh while a vote is in flight so the swiped card
+      // doesn't pop back in before the server has caught up.
+      if (votePending === 0) refreshDeck();
+    }
     else if (state.view === 'ongoing') refreshOngoing();
     else if (state.view === 'history') refreshHistory();
     else if (state.view === 'who') { refreshConfig(); refreshWho(); }
-  }, 3000);
+  }, 6000);
 }
 function stopPolling() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
