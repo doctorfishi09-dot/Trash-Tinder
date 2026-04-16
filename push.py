@@ -118,20 +118,11 @@ def get_public_key() -> str:
     return pub
 
 
-def send_to_subscriptions(subs: list, payload: dict) -> int:
-    """Push `payload` to each subscription. Returns successful send count.
-
-    Subscriptions that come back as 404/410 (expired/unsubscribed) are
-    pruned from the database. Other errors are logged but not raised.
-    """
-    if not subs or not is_available():
-        return 0
-    priv, _ = _load_or_create_keys()
-    if not priv:
-        return 0
+def _send_now(subs: list, payload: dict, priv: str) -> None:
+    """The actual blocking send loop — runs on a background thread so the
+    request handler doesn't have to wait on FCM round-trips."""
     body = json.dumps(payload)
     claims = {"sub": VAPID_SUBJECT}
-    sent = 0
     for s in subs:
         sub_info = {
             "endpoint": s["endpoint"],
@@ -144,7 +135,6 @@ def send_to_subscriptions(subs: list, payload: dict) -> int:
                 vapid_private_key=priv,
                 vapid_claims=dict(claims),
             )
-            sent += 1
         except WebPushException as e:
             code = getattr(getattr(e, "response", None), "status_code", None)
             if code in (404, 410):
@@ -156,7 +146,21 @@ def send_to_subscriptions(subs: list, payload: dict) -> int:
                 traceback.print_exc()
         except Exception:
             traceback.print_exc()
-    return sent
+
+
+def send_to_subscriptions(subs: list, payload: dict) -> None:
+    """Dispatch `payload` to each subscription on a daemon thread so the
+    caller (a request handler) returns immediately. Subscriptions that
+    come back as 404/410 are pruned from the database asynchronously.
+    """
+    if not subs or not is_available():
+        return
+    priv, _ = _load_or_create_keys()
+    if not priv:
+        return
+    threading.Thread(
+        target=_send_now, args=(list(subs), payload, priv), daemon=True
+    ).start()
 
 
 # ---------- high-level triggers ----------
@@ -190,17 +194,17 @@ def notify_new_item(item: dict, household_id: str, creator_user_id: str) -> None
     send_to_subscriptions(subs, payload)
 
 
-def notify_deadline_warning(item: dict) -> int:
+def notify_deadline_warning(item: dict) -> None:
     """Push a 'voting closes soon' warning to users in the item's household
-    who still have not cast a real (keep/toss) vote. Returns send count."""
+    who still have not cast a real (keep/toss) vote."""
     if not is_available():
-        return 0
+        return
     pending_user_ids = db.users_pending_real_vote(item["id"])
     if not pending_user_ids:
-        return 0
+        return
     subs = db.list_push_subscriptions_for_users(pending_user_ids)
     if not subs:
-        return 0
+        return
     title_part = item.get("title") or "an item"
     hh_name = _household_name(item.get("household_id", ""))
     payload = {
@@ -210,20 +214,20 @@ def notify_deadline_warning(item: dict) -> int:
         "household_id": item.get("household_id"),
         "item_id": item["id"],
     }
-    return send_to_subscriptions(subs, payload)
+    send_to_subscriptions(subs, payload)
 
 
-def notify_item_decided(item_id: str) -> int:
+def notify_item_decided(item_id: str) -> None:
     """Push the result of a closed item to everyone in the household."""
     if not is_available():
-        return 0
+        return
     item = db.item_with_tally(item_id)
     if not item or item.get("status") not in ("kept", "tossed"):
-        return 0
+        return
     hh_id = item["household_id"]
     subs = db.list_push_subscriptions_for_household(hh_id)
     if not subs:
-        return 0
+        return
     title_part = item.get("title") or "an item"
     tally = item.get("tally") or {}
     keeps = tally.get("keep", 0)
@@ -237,7 +241,7 @@ def notify_item_decided(item_id: str) -> int:
         "household_id": hh_id,
         "item_id": item_id,
     }
-    return send_to_subscriptions(subs, payload)
+    send_to_subscriptions(subs, payload)
 
 
 def notify_outcomes(outcomes) -> None:
@@ -254,16 +258,16 @@ def notify_outcomes(outcomes) -> None:
                 traceback.print_exc()
 
 
-def notify_member_joined(household_id: str, new_user_id: str) -> int:
+def notify_member_joined(household_id: str, new_user_id: str) -> None:
     """Push 'X joined the household' to every existing member except the
     person who just joined."""
     if not is_available():
-        return 0
+        return
     subs = db.list_push_subscriptions_for_household(
         household_id, exclude_user_id=new_user_id
     )
     if not subs:
-        return 0
+        return
     user = db.get_user_by_id(new_user_id)
     name = user["name"] if user else "Someone"
     hh_name = _household_name(household_id)
@@ -273,18 +277,15 @@ def notify_member_joined(household_id: str, new_user_id: str) -> int:
         "body": "Say hi in the Who tab.",
         "household_id": household_id,
     }
-    return send_to_subscriptions(subs, payload)
+    send_to_subscriptions(subs, payload)
 
 
-def sweep_deadline_warnings() -> int:
-    """Find items hitting their 1-hour mark and warn non-voters. Returns
-    total push messages sent."""
+def sweep_deadline_warnings() -> None:
+    """Find items hitting their 1-hour mark and warn non-voters."""
     if not is_available():
-        return 0
+        return
     items = db.items_needing_deadline_warning(window_seconds=3600)
-    total = 0
     for it in items:
-        total += notify_deadline_warning(it)
-        # Mark even when 0 sent so we don't re-check this item every minute.
+        notify_deadline_warning(it)
+        # Mark unconditionally so we don't re-check this item every minute.
         db.mark_item_deadline_notified(it["id"])
-    return total
