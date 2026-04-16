@@ -86,6 +86,18 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id);
 """
 
 
@@ -154,6 +166,12 @@ def _migrate(conn) -> None:
     if "close_reason" not in item_cols:
         conn.execute(
             "ALTER TABLE items ADD COLUMN close_reason TEXT"
+        )
+
+    # When the 1-hour-before-deadline push was sent (NULL = not yet).
+    if "deadline_notified_at" not in item_cols:
+        conn.execute(
+            "ALTER TABLE items ADD COLUMN deadline_notified_at INTEGER"
         )
 
     # Old 'dunno' votes become 'skip'.
@@ -803,6 +821,123 @@ def finalize_all_pending(household_id: str = None) -> list:
         if outcome:
             results.append(outcome)
     return results
+
+
+# ---------- push subscriptions ----------
+
+def add_push_subscription(user_id: str, endpoint: str, p256dh: str, auth: str) -> bool:
+    """Store (or upsert by endpoint) a Web Push subscription for a user."""
+    if not (user_id and endpoint and p256dh and auth):
+        return False
+    if not get_user_by_id(user_id):
+        return False
+    sid = new_id()
+    ts = now()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO push_subscriptions
+               (id, user_id, endpoint, p256dh, auth, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(endpoint) DO UPDATE SET
+                   user_id = excluded.user_id,
+                   p256dh = excluded.p256dh,
+                   auth = excluded.auth""",
+            (sid, user_id, endpoint, p256dh, auth, ts),
+        )
+    return True
+
+
+def delete_push_subscription_by_endpoint(endpoint: str) -> bool:
+    if not endpoint:
+        return False
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,)
+        )
+        return cur.rowcount > 0
+
+
+def list_push_subscriptions_for_household(
+    household_id: str, exclude_user_id: str = None
+) -> list:
+    """Every push subscription for users in a household, optionally excluding one."""
+    with get_conn() as conn:
+        if exclude_user_id:
+            rows = conn.execute(
+                """SELECT ps.* FROM push_subscriptions ps
+                   JOIN users u ON u.id = ps.user_id
+                   WHERE u.household_id = ? AND ps.user_id != ?""",
+                (household_id, exclude_user_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT ps.* FROM push_subscriptions ps
+                   JOIN users u ON u.id = ps.user_id
+                   WHERE u.household_id = ?""",
+                (household_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def list_push_subscriptions_for_users(user_ids: list) -> list:
+    if not user_ids:
+        return []
+    placeholders = ",".join("?" for _ in user_ids)
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM push_subscriptions WHERE user_id IN ({placeholders})",
+            tuple(user_ids),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def items_needing_deadline_warning(window_seconds: int = 3600) -> list:
+    """Items whose deadline is within the next `window_seconds` and haven't
+    been warned yet. Returns dict rows, including a derived `deadline_at`."""
+    ts = now()
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT *, (round_started_at + time_limit_seconds) AS deadline_at
+               FROM items
+               WHERE status = 'pending'
+                 AND time_limit_seconds IS NOT NULL
+                 AND time_limit_seconds > 0
+                 AND deadline_notified_at IS NULL
+                 AND (round_started_at + time_limit_seconds) > ?
+                 AND (round_started_at + time_limit_seconds) <= ?""",
+            (ts, ts + window_seconds),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_item_deadline_notified(item_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE items SET deadline_notified_at = ? WHERE id = ?",
+            (now(), item_id),
+        )
+
+
+def users_pending_real_vote(item_id: str) -> list:
+    """User IDs in the item's household who haven't cast a keep/toss this round.
+
+    Includes users with no vote AND users who only skipped.
+    """
+    item = get_item(item_id)
+    if not item:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT u.id FROM users u
+               WHERE u.household_id = ?
+                 AND u.id NOT IN (
+                     SELECT user_id FROM votes
+                     WHERE item_id = ? AND round = ?
+                       AND choice IN ('keep', 'toss')
+                 )""",
+            (item["household_id"], item_id, item["round"]),
+        ).fetchall()
+        return [r["id"] for r in rows]
 
 
 def stats(household_id: str) -> dict:

@@ -212,6 +212,30 @@ const api = {
     if (!r.ok) throw new Error(j.error || 'clear failed');
     return j;
   },
+  // push
+  async getVapidKey() {
+    const r = await fetch('/api/push/vapid-public-key');
+    if (!r.ok) return { available: false, public_key: null };
+    return await r.json();
+  },
+  async subscribePush(userId, subscription) {
+    const r = await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, subscription }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'subscribe failed');
+    return j;
+  },
+  async unsubscribePush(endpoint) {
+    const r = await fetch('/api/push/unsubscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint }),
+    });
+    return r.ok;
+  },
 };
 
 // ---------- toast ----------
@@ -893,6 +917,7 @@ async function refreshWho() {
   document.getElementById('stat-pending').textContent = state.stats.pending || 0;
   document.getElementById('stat-kept').textContent = state.stats.kept || 0;
   document.getElementById('stat-tossed').textContent = state.stats.tossed || 0;
+  updatePushButtonState();
 }
 
 async function removeUserFlow(user) {
@@ -936,6 +961,105 @@ document.getElementById('btn-rename-household').addEventListener('click', async 
     toast('Renamed');
   } catch (e) {
     toast(e.message);
+  }
+});
+
+// ---------- push notifications ----------
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+async function getCurrentPushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return null;
+    return await reg.pushManager.getSubscription();
+  } catch { return null; }
+}
+
+async function updatePushButtonState() {
+  const btn = document.getElementById('btn-push-toggle');
+  const status = document.getElementById('push-status');
+  if (!btn || !status) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    btn.disabled = true;
+    btn.textContent = 'Notifications not supported';
+    if (window.isSecureContext === false) {
+      status.textContent = 'Push notifications require HTTPS. They will work on the live site, just not on this LAN/HTTP test URL.';
+    } else {
+      status.textContent = 'This browser does not support push notifications.';
+    }
+    return;
+  }
+  if (Notification.permission === 'denied') {
+    btn.disabled = true;
+    btn.textContent = 'Notifications blocked';
+    status.textContent = 'Permission was blocked. Re-enable it in your browser/system settings, then come back.';
+    return;
+  }
+  const sub = await getCurrentPushSubscription();
+  if (sub) {
+    btn.disabled = false;
+    btn.textContent = 'Disable notifications on this device';
+    status.textContent = 'You will get a push when someone adds an item, and 1h before voting closes on items you have not voted on.';
+  } else {
+    btn.disabled = false;
+    btn.textContent = 'Enable notifications on this device';
+    status.textContent = 'Get pinged when there is something new to vote on.';
+  }
+}
+
+async function enablePush() {
+  if (!state.currentUser) { toast('Pick a household first.'); return; }
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    toast('Push not supported here'); return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') {
+    toast('Notifications were not allowed');
+    updatePushButtonState();
+    return;
+  }
+  const info = await api.getVapidKey();
+  if (!info.available || !info.public_key) {
+    toast('Server is not set up for push yet'); return;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(info.public_key),
+  });
+  await api.subscribePush(state.currentUser.id, sub.toJSON());
+  toast('Notifications enabled');
+  updatePushButtonState();
+}
+
+async function disablePush() {
+  const sub = await getCurrentPushSubscription();
+  if (sub) {
+    try { await api.unsubscribePush(sub.endpoint); } catch {}
+    try { await sub.unsubscribe(); } catch {}
+  }
+  toast('Notifications disabled');
+  updatePushButtonState();
+}
+
+document.getElementById('btn-push-toggle').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-push-toggle');
+  btn.disabled = true;
+  try {
+    const existing = await getCurrentPushSubscription();
+    if (existing) await disablePush();
+    else await enablePush();
+  } catch (e) {
+    toast(e.message || 'Push error');
+    updatePushButtonState();
   }
 });
 

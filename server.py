@@ -29,6 +29,7 @@ from urllib.parse import parse_qs
 from wsgiref.simple_server import WSGIServer, make_server
 
 import db
+import push
 
 STATIC_DIR = os.path.join(db.BASE_DIR, "static")
 PORT = int(os.environ.get("PORT", "3000"))
@@ -75,6 +76,10 @@ def maybe_sweep_timeouts() -> None:
         _last_sweep_at[0] = now_ts
     try:
         db.finalize_all_timed_out()
+    except Exception:
+        traceback.print_exc()
+    try:
+        push.sweep_deadline_warnings()
     except Exception:
         traceback.print_exc()
 
@@ -249,6 +254,10 @@ def create_item_from_multipart(environ) -> tuple:
         time_limit_seconds=time_limit_seconds,
     )
     item = db.item_with_tally(item["id"])
+    try:
+        push.notify_new_item(item, hh_id, user_id)
+    except Exception:
+        traceback.print_exc()
     return json_resp(200, {"item": item})
 
 
@@ -345,6 +354,13 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
                 return json_resp(400, {"error": "unknown household"})
             return json_resp(200, config_snapshot(hh_id))
 
+        if path == "/api/push/vapid-public-key":
+            key = push.get_public_key()
+            return json_resp(
+                200,
+                {"available": push.is_available(), "public_key": key},
+            )
+
         return text_resp(404, "Not Found")
 
     # ---- POST api ----
@@ -428,6 +444,33 @@ def handle(method: str, path: str, qs: dict, environ) -> tuple:
                 return json_resp(400, {"error": "vote rejected"})
             outcome = db.finalize_if_ready(item_id)
             return json_resp(200, {"ok": True, "outcome": outcome})
+
+        if path == "/api/push/subscribe":
+            data = read_json(environ)
+            if data is None:
+                return json_resp(400, {"error": "bad json"})
+            user_id = (data.get("user_id") or "").strip()
+            sub = data.get("subscription") or {}
+            endpoint = (sub.get("endpoint") or "").strip()
+            keys = sub.get("keys") or {}
+            p256dh = (keys.get("p256dh") or "").strip()
+            auth = (keys.get("auth") or "").strip()
+            if not (user_id and endpoint and p256dh and auth):
+                return json_resp(400, {"error": "missing fields"})
+            ok = db.add_push_subscription(user_id, endpoint, p256dh, auth)
+            if not ok:
+                return json_resp(400, {"error": "could not subscribe"})
+            return json_resp(200, {"ok": True})
+
+        if path == "/api/push/unsubscribe":
+            data = read_json(environ)
+            if data is None:
+                return json_resp(400, {"error": "bad json"})
+            endpoint = (data.get("endpoint") or "").strip()
+            if not endpoint:
+                return json_resp(400, {"error": "missing endpoint"})
+            db.delete_push_subscription_by_endpoint(endpoint)
+            return json_resp(200, {"ok": True})
 
         return text_resp(404, "Not Found")
 

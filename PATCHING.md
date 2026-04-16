@@ -73,6 +73,25 @@ every `git pull` — they never get overwritten:
 
 Only source code moves through Git.
 
+## One-time pip installs on PA
+
+Some patches add new Python dependencies. Install them in PA's Bash console
+once, then click **Reload** in the Web tab.
+
+| Patch | Command |
+| --- | --- |
+| Push notifications (this patch) | `pip3.10 install --user pywebpush` |
+
+If you skip the install, the app keeps working — just the related feature is
+silently disabled (e.g. push sends become no-ops). The error log will show
+`ImportError` only if the code tries to import the dep without a guard.
+
+To check what's installed:
+
+```bash
+pip3.10 list --user | grep -i webpush
+```
+
 ## Schema changes
 
 When a change requires new columns or tables, add migration logic to

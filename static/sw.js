@@ -1,8 +1,9 @@
-// Trash Tinder service worker — minimal app-shell cache for offline installability.
+// Trash Tinder service worker — minimal app-shell cache for offline installability,
+// plus Web Push handlers for new-item and deadline-warning notifications.
 // The real data is always fetched live; we just cache the static shell so the app
 // still opens when reception is flaky.
 
-const CACHE = 'trash-tinder-v1';
+const CACHE = 'trash-tinder-v2';
 const SHELL = [
   '/',
   '/app.js',
@@ -44,6 +45,45 @@ self.addEventListener('fetch', event => {
         }
         return res;
       }).catch(() => hit);
+    })
+  );
+});
+
+// ---------- Web Push ----------
+
+self.addEventListener('push', event => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (e) {
+    data = { title: 'Trash Tinder', body: event.data ? event.data.text() : '' };
+  }
+  const title = data.title || 'Trash Tinder';
+  const opts = {
+    body: data.body || '',
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    data: { url: data.url || '/', item_id: data.item_id || null, kind: data.kind || null },
+    tag: data.kind === 'deadline_warning' && data.item_id ? ('deadline-' + data.item_id) : undefined,
+  };
+  event.waitUntil(self.registration.showNotification(title, opts));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const target = (event.notification.data && event.notification.data.url) || '/';
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+      for (const client of list) {
+        // Same-origin window already open — focus it.
+        try {
+          const u = new URL(client.url);
+          if (u.origin === self.location.origin) {
+            return client.focus();
+          }
+        } catch (e) { /* ignore */ }
+      }
+      return self.clients.openWindow(target);
     })
   );
 });
